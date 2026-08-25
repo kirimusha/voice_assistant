@@ -1,147 +1,78 @@
 from __future__ import annotations
 
 import json
-import time
+import os
+from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import sounddevice as sd
 from vosk import KaldiRecognizer, Model
 
 
 class ASRRecognizer:
-    """Реальное распознавание речи через локальный Vosk ASR."""
+    """Распознавание речи через локальный Vosk ASR (RawInputStream + callback)."""
 
-    def __init__(self, use_demo_input: bool = False) -> None:
-        self.use_demo_input = use_demo_input
-        self.vosk_model_dir = VOSK_MODEL_DIR
-        self.sample_rate = DEFAULT_SAMPLE_RATE
-        self.block_size = 4000
-        self.input_device_index = self._resolve_input_device()
-        self._model = None
-        self._recognizer = None
-        self._load_model()
+    def __init__(
+        self,
+        model_path: str = "/Users/kirimusha/projects/voice_assistant/models/vosk-model-small-ru-0.22",
+        json_file: str = "/Users/kirimusha/projects/voice_assistant/transcription.json",
+        sample_rate: int = 16000,
+        block_size: int = 2000,
+    ) -> None:
+        self.sample_rate = sample_rate
+        self.block_size = block_size
+        self.json_file = json_file
 
-    def _resolve_input_device(self) -> int | None:
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            return None
+        self.model = Model(model_path)
+        self.recognizer = KaldiRecognizer(self.model, self.sample_rate)
 
-        if isinstance(devices, list):
-            for idx, device in enumerate(devices):
-                name = str(device.get("name", "")).lower()
-                if "microphone" in name and device.get("max_input_channels", 0) > 0:
-                    print(f"[ASR] selected microphone device: {idx} -> {device.get('name')}")
-                    return idx
+        self._last_text: str = ""
 
-        return None
+    def _save_to_json(self, text: str) -> None:
+        """Сохраняет одну запись в JSON файл."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "text": text,
+        }
 
-    def _load_model(self) -> None:
-        model_dir = self._resolve_model_dir()
-        if model_dir is None:
-            print(
-                f"[ASR] Vosk model directory not found. "
-                f"Put a model into {self.vosk_model_dir} and restart the assistant."
-            )
-            return
+        if os.path.exists(self.json_file):
+            with open(self.json_file, "r", encoding="utf-8") as f:
+                try:
+                    data = json.load(f)
+                except json.JSONDecodeError:
+                    data = []
+        else:
+            data = []
 
-        try:
-            self._model = Model(model_path=str(model_dir))
-            self._recognizer = KaldiRecognizer(self._model, self.sample_rate)
-            self._recognizer.SetWords(False)
-            self._recognizer.SetPartialWords(True)
-            print(f"[ASR] Vosk model loaded from: {model_dir}")
-        except Exception as exc:
-            print(f"[ASR] Не удалось загрузить Vosk-модель: {exc}")
-            self._model = None
-            self._recognizer = None
+        data.append(entry)
 
-    def _resolve_model_dir(self) -> Path | None:
-        if not self.vosk_model_dir.exists():
-            return None
+        with open(self.json_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
-        candidates = [
-            self.vosk_model_dir,
-            self.vosk_model_dir / "model",
-        ]
+    def _callback(self, indata, frames, time_info, status) -> None:
+        if status:
+            print(status)
 
-        for candidate in candidates:
-            if candidate.exists() and (
-                (candidate / "conf").exists() or (candidate / "am").exists()
-            ):
-                return candidate
+        if self.recognizer.AcceptWaveform(bytes(indata)):
+            result = json.loads(self.recognizer.Result())
+            text = result.get("text", "")
+            if text:
+                self._last_text = text
+                self._save_to_json(text)
+            print("Распознано:", text)
+        else:
+            partial = json.loads(self.recognizer.PartialResult())
+            print("Промежуточно:", partial.get("partial", ""))
 
-        for child in sorted(self.vosk_model_dir.iterdir()):
-            if child.is_dir() and (
-                (child / "conf").exists() or (child / "am").exists()
-            ):
-                return child
-
-        return None
-
-    def _read_live_transcript(self, timeout: float = 3.0) -> str:
-        if self._recognizer is None or self._model is None:
-            return ""
-
-        deadline = time.monotonic() + timeout
-        transcript = ""
-
-        try:
-            with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
-                dtype="int16",
-                blocksize=self.block_size,
-                latency="low",
-                device=self.input_device_index,
-            ) as stream:
-                chunk_index = 0
-                while time.monotonic() < deadline:
-                    frames, _ = stream.read(self.block_size)
-                    audio = np.asarray(frames, dtype=np.int16)
-                    if audio.ndim == 2:
-                        audio = audio.reshape(-1)
-
-                    if audio.size == 0:
-                        continue
-
-                    audio_energy = float(np.sqrt(np.mean(np.abs(audio.astype(np.float32)) ** 2)))
-                    chunk_index += 1
-                    if chunk_index % 5 == 0:
-                        print(f"[ASR] mic_level={audio_energy:.3f}")
-
-                    if self._recognizer.AcceptWaveform(audio.tobytes()):
-                        result = json.loads(self._recognizer.Result())
-                        candidate = result.get("text", "").strip()
-                        if candidate:
-                            transcript = candidate
-                            print(f"[ASR] final={transcript}")
-                            return transcript
-
-                    partial = json.loads(self._recognizer.PartialResult())
-                    partial_text = partial.get("partial", "").strip()
-                    if partial_text:
-                        print(f"[ASR] partial={partial_text}")
-
-                final_result = json.loads(self._recognizer.FinalResult())
-                transcript = final_result.get("text", "").strip()
-                if transcript:
-                    print(f"[ASR] final={transcript}")
-                return transcript
-        except Exception as exc:
-            print(f"[ASR] Ошибка записи/распознавания микрофона: {exc}")
-            return ""
-
-    def listen_and_recognize(self, timeout: float = 3.0) -> str:
-        try:
-            if self.use_demo_input:
-                return input("Введите команду: ").strip()
-
-            transcript = self._read_live_transcript(timeout=timeout)
-            if transcript:
-                return transcript
-
-            return input("Введите команду (Vosk не распознал аудио): ").strip()
-        except EOFError:
-            return ""
+    def listen_forever(self) -> None:
+        """Запускает бесконечное прослушивание микрофона (как в workwithvosk.py)."""
+        with sd.RawInputStream(
+            samplerate=self.sample_rate,
+            blocksize=self.block_size,
+            dtype="int16",
+            channels=1,
+            callback=self._callback,
+        ):
+            print("Начало записи, говорите...")
+            while True:
+                sd.sleep(1000)
