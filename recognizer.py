@@ -9,9 +9,8 @@ import sounddevice as sd
 from vosk import KaldiRecognizer, Model
 
 
-class ASRRecognizer:
-    """Распознавание речи через локальный Vosk ASR (RawInputStream + callback)."""
-
+class TextRecognizer:
+    """Распознавание речи через локальный Vosk ASR"""
     def __init__(
         self,
         model_path: str = "/Users/kirimusha/projects/voice_assistant/models/vosk-model-small-ru-0.22",
