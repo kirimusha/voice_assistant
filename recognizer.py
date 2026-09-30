@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import sounddevice as sd
 from vosk import KaldiRecognizer, Model
+
+from command_analyzer import CommandAnalyzer
 
 
 class TextRecognizer:
@@ -26,6 +29,11 @@ class TextRecognizer:
         self.recognizer = KaldiRecognizer(self.model, self.sample_rate)
 
         self._last_text: str = ""
+        self._stop_event = threading.Event()
+        self.command_analyzer = CommandAnalyzer(
+            json_file=self.json_file,
+            on_stop=self._stop_event.set,
+        )
 
     def _save_to_json(self, text: str) -> None:
         """Сохраняет одну запись в JSON файл."""
@@ -58,6 +66,7 @@ class TextRecognizer:
             if text:
                 self._last_text = text
                 self._save_to_json(text)
+                self.command_analyzer.analyze_text(text)
             print("Распознано:", text)
         else:
             partial = json.loads(self.recognizer.PartialResult())
@@ -65,6 +74,7 @@ class TextRecognizer:
 
     def listen_forever(self) -> None:
         """Запускает бесконечное прослушивание микрофона (как в workwithvosk.py)."""
+        self._stop_event.clear()
         with sd.RawInputStream(
             samplerate=self.sample_rate,
             blocksize=self.block_size,
@@ -73,5 +83,7 @@ class TextRecognizer:
             callback=self._callback,
         ):
             print("Начало записи, говорите...")
-            while True:
-                sd.sleep(1000)
+            while not self._stop_event.is_set():
+                sd.sleep(100)
+        if self._stop_event.is_set():
+            print("Распознавание остановлено командой «стоп».")

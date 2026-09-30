@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from recognizer import ASRRecognizer
+from recognizer import TextRecognizer
 
 
 class VoiceAssistant:
